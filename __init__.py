@@ -28,27 +28,11 @@ class ParameterSnapshotSaver:
         return ()
 
 
-class SnapshotManager:
-    @classmethod
-    def INPUT_TYPES(s):
-        return {"required": {}}
-
-    CATEGORY = "parameter-snapshot"
-    FUNCTION = "noop"
-    RETURN_TYPES = ()
-    OUTPUT_NODE = True
-
-    def noop(self):
-        return {}
-
-
 NODE_CLASS_MAPPINGS = {
     "ParameterSnapshotSaver": ParameterSnapshotSaver,
-    "SnapshotManager": SnapshotManager,
 }
 NODE_DISPLAY_NAME_MAPPINGS = {
     "ParameterSnapshotSaver": "Parameter Snapshot Saver",
-    "SnapshotManager": "Snapshot Manager",
 }
 
 __all__ = ["WEB_DIRECTORY", "NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS"]

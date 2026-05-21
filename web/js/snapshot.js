@@ -314,18 +314,116 @@ function buildManageDialog(node) {
     });
 }
 
-function buildSnapshotManagerUI(container, node) {
-    container.style.cssText = "width:100%;height:100%;display:flex;flex-direction:column;overflow:hidden;background:#2a2a2a;border-radius:4px;";
+
+
+function collectWidgetValues(n, targetMapping) {
+    if (!n.widgets) return;
+    const nt = resolveNodeType(n);
+    if (!nt) return;
+    for (const w of n.widgets) {
+        if (!w.name || w.type === "control_after_generate" || w.options?.isControlWidget) continue;
+        targetMapping[nt] = targetMapping[nt] || {};
+        targetMapping[nt][w.name] = w.value;
+    }
+}
+
+function collectLiveWidgets(graph, targetMapping, seen) {
+    for (const n of graph._nodes || []) {
+        if (seen.has(n) || n.isVirtualNode) continue;
+        seen.add(n);
+        collectWidgetValues(n, targetMapping);
+        if (n.subgraph) collectLiveWidgets(n.subgraph, targetMapping, seen);
+        if (n.graph && n.graph !== graph && n.graph !== app.graph) {
+            collectLiveWidgets(n.graph, targetMapping, seen);
+        }
+    }
+}
+
+function collectAllLiveNodes() {
+    const allNodes = [];
+    const seen = new Set();
+    function walk(nodes) {
+        for (const n of nodes || []) {
+            if (seen.has(n)) continue;
+            seen.add(n);
+            if (n.isVirtualNode) continue;
+            allNodes.push(n);
+            if (n.subgraph) walk(n.subgraph._nodes);
+            if (n.graph && n.graph !== app.graph) walk(n.graph._nodes);
+        }
+    }
+    walk(app.graph._nodes);
+    const canvasGraph = app.canvas?.graph;
+    if (canvasGraph && canvasGraph !== app.graph) walk(canvasGraph._nodes);
+    return allNodes;
+}
+
+function applyValuesToLiveNode(liveNode, vals) {
+    if (!liveNode.widgets) return false;
+    let changed = false;
+    for (const w of liveNode.widgets) {
+        if (!w.name || w.type === "control_after_generate" || w.options?.isControlWidget) continue;
+        if (w.name in vals && w.value !== vals[w.name]) {
+            w.value = vals[w.name];
+            if (w.callback) w.callback(vals[w.name]);
+            changed = true;
+        }
+    }
+    if (liveNode.inputs) {
+        for (const inp of liveNode.inputs) {
+            if (!inp.widget) continue;
+            const wName = inp.widget.name || inp.name;
+            if (!wName || !(wName in vals)) continue;
+            if (inp.value !== vals[wName]) {
+                inp.value = vals[wName];
+                changed = true;
+            }
+        }
+    }
+    return changed;
+}
+
+function applySnapshotDirect(snapshotVals, nodeType) {
+    const isBundle = !!snapshotVals.__bundle__;
+    const nodes = collectAllLiveNodes();
+    let applied = 0;
+
+    for (const n of nodes) {
+        const nt = resolveNodeType(n);
+        if (!nt) continue;
+
+        let targetVals = null;
+        if (isBundle) {
+            targetVals = snapshotVals[nt] || null;
+        } else if (nt === nodeType) {
+            targetVals = snapshotVals;
+        }
+
+        if (!targetVals) continue;
+        if (applyValuesToLiveNode(n, targetVals)) applied++;
+    }
+
+    if (applied > 0) {
+        app.graph.change();
+        app.canvas?.setDirty(true, true);
+    }
+    return applied;
+}
+
+async function buildSidebar(el) {
+    el.innerHTML = "";
+    const container = document.createElement("div");
+    container.style.cssText = "width:100%;height:100%;display:flex;flex-direction:column;overflow:hidden;";
 
     const header = document.createElement("div");
-    header.style.cssText = "display:flex;justify-content:space-between;align-items:center;padding:4px 6px;flex-shrink:0;border-bottom:1px solid #444;";
+    header.style.cssText = "display:flex;justify-content:space-between;align-items:center;padding:8px 10px;flex-shrink:0;border-bottom:1px solid var(--border-color,#444);";
     const title = document.createElement("span");
-    title.textContent = "Snapshot Manager";
-    title.style.cssText = "color:#fff;font-size:13px;font-weight:bold;";
+    title.textContent = "Parameter Snapshots";
+    title.style.cssText = "color:var(--input-text,#ddd);font-size:14px;font-weight:bold;";
     const refreshBtn = document.createElement("button");
     refreshBtn.textContent = "R";
     refreshBtn.title = "Refresh";
-    refreshBtn.style.cssText = "background:#444;border:1px solid #666;border-radius:3px;color:#ccc;cursor:pointer;padding:1px 6px;font-size:11px;";
+    refreshBtn.style.cssText = "background:var(--comfy-menu-bg,#444);border:1px solid var(--border-color,#666);border-radius:3px;color:var(--input-text,#ccc);cursor:pointer;padding:2px 8px;font-size:12px;";
     header.appendChild(title);
     header.appendChild(refreshBtn);
     container.appendChild(header);
@@ -333,64 +431,9 @@ function buildSnapshotManagerUI(container, node) {
     const listWrap = document.createElement("div");
     listWrap.style.cssText = "flex:1;overflow-y:auto;";
     container.appendChild(listWrap);
-
-    let currentSnapshots = [];
-
-    function findLiveNode(nodeType) {
-        const seen = new Set();
-        
-        // Use app.graph to access the main graph and search recursively through all subgraphs
-        function searchInGraph(graph) {
-            for (const n of graph._nodes || []) {
-                if (seen.has(n)) continue;
-                seen.add(n);
-                if (n.isVirtualNode) continue;
-                
-                // Check current node type
-                if (resolveNodeType(n) === nodeType) return n;
-                
-                // Recursively search in subgraph container nodes
-                if (n.subgraph) {
-                    const found = searchInGraph(n.subgraph);
-                    if (found) return found;
-                }
-            }
-            return null;
-        }
-        
-        return searchInGraph(app.graph);
-    }
-
-    function applyBundleByNodes(vals) {
-        let applied = 0;
-        const seen = new Set();
-        
-        // Use app.graph to access the main graph and search recursively through all subgraphs
-        function applyInGraph(graph) {
-            for (const n of graph._nodes || []) {
-                if (seen.has(n)) continue;
-                seen.add(n);
-                if (n.isVirtualNode) continue;
-                
-                const nt = resolveNodeType(n);
-                if (nt && vals[nt]) {
-                    applyWidgetValues(n, vals[nt]);
-                    applied++;
-                }
-                
-                // Recursively search in subgraph container nodes
-                if (n.subgraph) {
-                    applyInGraph(n.subgraph);
-                }
-            }
-        }
-        
-        applyInGraph(app.graph);
-        return applied;
-    }
+    el.appendChild(container);
 
     async function render() {
-        try {
         while (listWrap.firstChild) listWrap.firstChild.remove();
 
         const allData = await fetchAllSnapshots();
@@ -400,76 +443,60 @@ function buildSnapshotManagerUI(container, node) {
                 flat.push({ ...s, nodeType: nt });
             }
         }
-        currentSnapshots = flat;
 
         if (flat.length === 0) {
             const empty = document.createElement("div");
             empty.textContent = "No snapshots yet";
-            empty.style.cssText = "padding:20px;text-align:center;color:#666;font-size:12px;";
+            empty.style.cssText = "padding:20px;text-align:center;color:var(--descrip-text,#666);font-size:12px;";
             listWrap.appendChild(empty);
             return;
         }
 
         for (const s of flat) {
             const row = document.createElement("div");
-            row.style.cssText = "display:flex;align-items:center;gap:4px;padding:3px 6px;border-bottom:1px solid #333;font-size:11px;";
+            row.style.cssText = "display:flex;align-items:center;gap:4px;padding:4px 10px;border-bottom:1px solid var(--border-color,#333);font-size:11px;";
 
             const nameSpan = document.createElement("span");
             nameSpan.textContent = s.name;
-            nameSpan.style.cssText = "flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0;color:#ddd;";
+            nameSpan.style.cssText = "flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0;color:var(--input-text,#ddd);";
 
-            const aBtn = mkButton("A", "#4a9", async (e) => {
-                e?.stopPropagation();
+            const aBtn = mkButton("A", "#4a9", async () => {
                 const snapshot = await apiGetSnapshot(s.id);
                 if (!snapshot) { showToast("warn", "Not Found", `Snapshot ${s.id} not found`); render(); return; }
                 const vals = snapshot.values;
                 if (!vals) { showToast("warn", "No Data", "Snapshot has no values"); render(); return; }
-                if (vals.__bundle__) {
-                    const applied = applyBundleByNodes(vals);
-                    const total = Object.keys(vals).length - 1;
-                    showToast(applied > 0 ? "info" : "warn", "Applied", `"${s.name}" applied to ${applied}/${total} type(s)`);
+                const applied = applySnapshotDirect(vals, s.nodeType);
+                if (applied > 0) {
+                    showToast("info", "Applied", `"${s.name}" applied to ${applied} node(s)`);
                 } else {
-                    const live = findLiveNode(s.nodeType);
-                    if (live) { applyWidgetValues(live, vals); showToast("info", "Applied", `"${s.name}" -> ${s.nodeType}`); }
-                    else { showToast("warn", "No Node", `No ${s.nodeType} in graph`); }
+                    showToast("warn", "No Match", `No matching nodes found in graph`);
                 }
                 render();
             }, true);
 
-            const oBtn = mkButton("O", "#a90", async (e) => {
-                e?.stopPropagation();
+            const oBtn = mkButton("O", "#a90", async () => {
                 const snapshot = await apiGetSnapshot(s.id);
                 if (!snapshot) { showToast("warn", "Not Found", `Snapshot ${s.id} not found`); render(); return; }
                 const vals = snapshot.values;
                 if (!vals) { showToast("warn", "No Data", "Snapshot has no values"); render(); return; }
-                let result;
+                if (!confirm(`Overwrite "${s.name}"?`)) { render(); return; }
+
+                const target = {};
+                const seen = new Set();
                 if (vals.__bundle__) {
-                    if (!confirm(`Overwrite "${s.name}"?`)) { render(); return; }
-                    const bundle = { "__bundle__": true };
-                    
-                    // Recursively collect node values from all subgraphs
-                    function collectFromGraph(graph) {
-                        for (const n of graph._nodes || []) {
-                            if (n.isVirtualNode) continue;
-                            const nt = resolveNodeType(n);
-                            if (!nt || nt === "__bundle__") continue;
-                            if (vals[nt]) bundle[nt] = getWidgetValues(n);
-                            
-                            // Recursively search in subgraph container nodes
-                            if (n.subgraph) {
-                                collectFromGraph(n.subgraph);
-                            }
-                        }
+                    for (const [nt] of Object.entries(vals)) {
+                        if (nt === "__bundle__") continue;
+                        target[nt] = {};
                     }
-                    
-                    collectFromGraph(app.graph);
-                    result = await apiOverwriteSnapshot(s.id, bundle);
+                    collectLiveWidgets(app.graph, target, seen);
                 } else {
-                    const live = findLiveNode(s.nodeType);
-                    if (!live) { showToast("warn", "No Node", `No ${s.nodeType} in graph`); render(); return; }
-                    if (!confirm(`Overwrite "${s.name}"?`)) { render(); return; }
-                    result = await apiOverwriteSnapshot(s.id, getWidgetValues(live));
+                    target[s.nodeType] = {};
+                    collectLiveWidgets(app.graph, target, seen);
                 }
+
+                const result = await apiOverwriteSnapshot(s.id, vals.__bundle__
+                    ? { __bundle__: true, ...target }
+                    : target[s.nodeType]);
                 if (result) {
                     showToast("success", "Overwritten", `"${s.name}" updated`);
                 } else {
@@ -478,8 +505,7 @@ function buildSnapshotManagerUI(container, node) {
                 render();
             }, true);
 
-            const rBtn = mkButton("R", "#67a", async (e) => {
-                e?.stopPropagation();
+            const rBtn = mkButton("R", "#67a", async () => {
                 const name = prompt("Rename to:", s.name);
                 if (!name || name === s.name) return;
                 const ok = await apiUpdateSnapshot(s.nodeType, s.id, { name });
@@ -491,8 +517,7 @@ function buildSnapshotManagerUI(container, node) {
                 render();
             }, true);
 
-            const dBtn = mkButton("X", "#c44", async (e) => {
-                e?.stopPropagation();
+            const dBtn = mkButton("X", "#c44", async () => {
                 if (!confirm(`Delete "${s.name}"?`)) return;
                 const ok = await apiDeleteSnapshot(s.id);
                 if (ok) {
@@ -510,16 +535,10 @@ function buildSnapshotManagerUI(container, node) {
             row.appendChild(dBtn);
             listWrap.appendChild(row);
         }
-    } catch (err) {
-        console.error("[ParamSnapshot] render error:", err);
-        const em = document.createElement("div");
-        em.textContent = "Error: " + err.message;
-        em.style.cssText = "padding:10px;color:#c44;font-size:11px;";
-        listWrap.appendChild(em);
-    } }
+    }
 
     refreshBtn.onclick = (e) => { e.stopPropagation(); render(); };
-    render();
+    await render();
 }
 
 function getConnectedUpstreamNodes(node) {
@@ -536,6 +555,21 @@ function getConnectedUpstreamNodes(node) {
 
 app.registerExtension({
     name: "comfyui.parameter_snapshot",
+
+    init() {
+        if (window.__COMFYUI_FRONTEND_VERSION__) {
+            app.extensionManager.registerSidebarTab({
+                id: "parameter-snapshot",
+                icon: "pi pi-bookmark",
+                title: "Snapshots",
+                tooltip: "Manage parameter snapshots",
+                type: "custom",
+                render: async (el) => {
+                    await buildSidebar(el);
+                },
+            });
+        }
+    },
 
     async beforeRegisterNodeDef(nodeType, nodeData, app) {
         if (nodeData.name === "ParameterSnapshotSaver") {
@@ -576,31 +610,12 @@ app.registerExtension({
             };
         }
 
-        if (nodeData.name === "SnapshotManager") {
-            const onNodeCreated = nodeType.prototype.onNodeCreated;
-            nodeType.prototype.onNodeCreated = function () {
-                onNodeCreated?.apply(this, arguments);
-
-                const node = this;
-                const container = document.createElement("div");
-                buildSnapshotManagerUI(container, node);
-
-                node.addDOMWidget("snapshot_ui", "custom", container, {
-                    serialize: false,
-                    getValue: () => null,
-                    setValue: () => {},
-                });
-
-                node.setSize([320, 280]);
-                if (node.graph) node.graph.change();
-            };
-        }
     },
 
     getNodeMenuItems(node) {
         const nodeType = node.comfyClass || node.type;
         if (!nodeType) return [];
-        if (nodeType === "ParameterSnapshotSaver" || nodeType === "SnapshotManager") return [];
+        if (nodeType === "ParameterSnapshotSaver") return [];
 
         return [
             {
