@@ -154,7 +154,7 @@ function buildManageDialog(node) {
     overlay.style.cssText = "position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.5);z-index:9999;display:flex;align-items:center;justify-content:center;";
 
     const panel = document.createElement("div");
-    panel.style.cssText = "background:#2a2a2a;border:1px solid #555;border-radius:8px;padding:16px;min-width:500px;max-height:500px;display:flex;flex-direction:column;color:#ccc;font-family:sans-serif;font-size:13px;";
+    panel.style.cssText = "background:#2a2a2a;border:1px solid #555;border-radius:8px;padding:16px;min-width:500px;max-height:500px;display:flex;flex-direction:column;color:#ccc;font-family:sans-serif;";
 
     const header = document.createElement("div");
     header.style.cssText = "display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;flex-shrink:0;";
@@ -338,44 +338,54 @@ function buildSnapshotManagerUI(container, node) {
 
     function findLiveNode(nodeType) {
         const seen = new Set();
-        const graphs = [];
-        let g = node.graph;
-        while (g) {
-            graphs.push(g);
-            g = g._subgraph_node?.graph;
-        }
-        for (const graph of graphs) {
+        
+        // Use app.graph to access the main graph and search recursively through all subgraphs
+        function searchInGraph(graph) {
             for (const n of graph._nodes || []) {
                 if (seen.has(n)) continue;
                 seen.add(n);
                 if (n.isVirtualNode) continue;
+                
+                // Check current node type
                 if (resolveNodeType(n) === nodeType) return n;
+                
+                // Recursively search in subgraph container nodes
+                if (n.subgraph) {
+                    const found = searchInGraph(n.subgraph);
+                    if (found) return found;
+                }
             }
+            return null;
         }
-        return null;
+        
+        return searchInGraph(app.graph);
     }
 
     function applyBundleByNodes(vals) {
         let applied = 0;
         const seen = new Set();
-        const graphs = [];
-        let g = node.graph;
-        while (g) {
-            graphs.push(g);
-            g = g._subgraph_node?.graph;
-        }
-        for (const graph of graphs) {
+        
+        // Use app.graph to access the main graph and search recursively through all subgraphs
+        function applyInGraph(graph) {
             for (const n of graph._nodes || []) {
                 if (seen.has(n)) continue;
                 seen.add(n);
                 if (n.isVirtualNode) continue;
+                
                 const nt = resolveNodeType(n);
                 if (nt && vals[nt]) {
                     applyWidgetValues(n, vals[nt]);
                     applied++;
                 }
+                
+                // Recursively search in subgraph container nodes
+                if (n.subgraph) {
+                    applyInGraph(n.subgraph);
+                }
             }
         }
+        
+        applyInGraph(app.graph);
         return applied;
     }
 
@@ -436,12 +446,23 @@ function buildSnapshotManagerUI(container, node) {
                 if (vals.__bundle__) {
                     if (!confirm(`Overwrite "${s.name}"?`)) { render(); return; }
                     const bundle = { "__bundle__": true };
-                    for (const n of node.graph?._nodes || []) {
-                        if (n.isVirtualNode) continue;
-                        const nt = resolveNodeType(n);
-                        if (!nt || nt === "__bundle__") continue;
-                        if (vals[nt]) bundle[nt] = getWidgetValues(n);
+                    
+                    // Recursively collect node values from all subgraphs
+                    function collectFromGraph(graph) {
+                        for (const n of graph._nodes || []) {
+                            if (n.isVirtualNode) continue;
+                            const nt = resolveNodeType(n);
+                            if (!nt || nt === "__bundle__") continue;
+                            if (vals[nt]) bundle[nt] = getWidgetValues(n);
+                            
+                            // Recursively search in subgraph container nodes
+                            if (n.subgraph) {
+                                collectFromGraph(n.subgraph);
+                            }
+                        }
                     }
+                    
+                    collectFromGraph(app.graph);
                     result = await apiOverwriteSnapshot(s.id, bundle);
                 } else {
                     const live = findLiveNode(s.nodeType);
