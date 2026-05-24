@@ -34,3 +34,16 @@ All snapshots are stored in a single JSON file at the ComfyUI user directory:
 ComfyUI/user/default/comfyui-parameter-snapshot.json
 ```
 
+
+## Known Issues
+
+### Snapshot Manager panel and subgraph container nodes
+
+| Entry | Subgraph container node | Normal node |
+|-------|------------------------|-------------|
+| Right-click Snapshots > Apply | Works | Works |
+| Snapshot Manager **A** / **O** buttons | May fail | Works |
+
+**Symptoms**: Right-click Snapshots > Manage Snapshots can Apply to subgraph container nodes correctly, but the Snapshot Manager widget panel's A/O buttons cannot affect subgraph container nodes. Normal nodes (e.g., CLIPTextEncode) work fine from both entry points.
+
+**Workaround**: For subgraph container nodes, use the right-click menu's Snapshots > Manage Snapshots (both Apply and Overwrite work correctly). The Snapshot Manager panel is currently recommended for non-subgraph scenarios only.
